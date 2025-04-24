@@ -13,6 +13,8 @@ def gather_ec2_data():
       - NAT Gateways
       - Internet Gateways
       - Elastic IP addresses
+      - VPCs
+      - Subnets
     Returns them as lists of dicts (one for each table).
     """
     ec2_instances_data = []
@@ -20,6 +22,8 @@ def gather_ec2_data():
     nat_gateways_data = []
     internet_gateways_data = []
     elastic_ips_data = []
+    vpcs_data = []
+    subnets_data = []
 
     for region in REGIONS:
         ec2 = boto3.client('ec2', region_name=region)
@@ -103,11 +107,44 @@ def gather_ec2_data():
         except ClientError as e:
             print(f"Error describing Elastic IPs in {region}: {e}")
 
+        # 6) VPCs
+        try:
+            response = ec2.describe_vpcs()
+            vpcs = response.get('Vpcs', [])
+            for vpc in vpcs:
+                vpcs_data.append({
+                    "Region": region,
+                    "VpcId": vpc['VpcId'],
+                    "State": vpc['State'],
+                    "CidrBlock": vpc.get('CidrBlock', 'N/A'),
+                    "IsDefault": vpc.get('IsDefault', False)
+                })
+        except ClientError as e:
+            print(f"Error describing VPCs in {region}: {e}")
+
+        # 7) Subnets
+        try:
+            response = ec2.describe_subnets()
+            subnets = response.get('Subnets', [])
+            for subnet in subnets:
+                subnets_data.append({
+                    "Region": region,
+                    "SubnetId": subnet['SubnetId'],
+                    "VpcId": subnet['VpcId'],
+                    "State": subnet['State'],
+                    "CidrBlock": subnet.get('CidrBlock', 'N/A'),
+                    "AvailabilityZone": subnet.get('AvailabilityZone', 'N/A')
+                })
+        except ClientError as e:
+            print(f"Error describing Subnets in {region}: {e}")
+
     return (ec2_instances_data,
             ec2_volumes_data,
             nat_gateways_data,
             internet_gateways_data,
-            elastic_ips_data)
+            elastic_ips_data,
+            vpcs_data,
+            subnets_data)
 
 
 def gather_s3_data():
@@ -350,13 +387,111 @@ def gather_dynamodb_data():
     return dynamodb_data
 
 
+def gather_cloudfront_data():
+    """
+    Lists CloudFront distributions (global service).
+    Returns a list of dicts.
+    """
+    cloudfront_data = []
+    cf = boto3.client('cloudfront')
+    try:
+        paginator = cf.get_paginator('list_distributions')
+        for page in paginator.paginate():
+            items = page.get('DistributionList', {}).get('Items', [])
+            for dist in items:
+                cloudfront_data.append({
+                    "DistributionId": dist['Id'],
+                    "DomainName": dist['DomainName'],
+                    "Status": dist['Status'],
+                    "Enabled": dist['Enabled']
+                })
+    except ClientError as e:
+        print(f"Error listing CloudFront distributions: {e}")
+    return cloudfront_data
+
+
+def gather_route53_data():
+    """
+    Lists Route 53 hosted zones (global service).
+    Returns a list of dicts.
+    """
+    route53_data = []
+    r53 = boto3.client('route53')
+    try:
+        paginator = r53.get_paginator('list_hosted_zones')
+        for page in paginator.paginate():
+            zones = page.get('HostedZones', [])
+            for zone in zones:
+                route53_data.append({
+                    "ZoneId": zone['Id'].split('/')[-1], # Extract ID from /hostedzone/ID
+                    "Name": zone['Name'],
+                    "PrivateZone": zone['Config']['PrivateZone'],
+                    "ResourceRecordSetCount": zone.get('ResourceRecordSetCount', 'N/A')
+                })
+    except ClientError as e:
+        print(f"Error listing Route 53 hosted zones: {e}")
+    return route53_data
+
+
+def gather_sqs_data():
+    """
+    Lists SQS queues in the specified regions.
+    Returns a list of dicts.
+    """
+    sqs_data = []
+    for region in REGIONS:
+        sqs = boto3.client('sqs', region_name=region)
+        try:
+            paginator = sqs.get_paginator('list_queues')
+            for page in paginator.paginate():
+                queue_urls = page.get('QueueUrls', [])
+                for queue_url in queue_urls:
+                    # Extract queue name from URL
+                    queue_name = queue_url.split('/')[-1]
+                    sqs_data.append({
+                        "Region": region,
+                        "QueueName": queue_name,
+                        "QueueUrl": queue_url
+                    })
+        except ClientError as e:
+            print(f"Error listing SQS queues in {region}: {e}")
+    return sqs_data
+
+
+def gather_iam_data():
+    """
+    Lists IAM roles (global service). Limited to 1000 roles for brevity.
+    Returns a list of dicts.
+    """
+    iam_data = []
+    iam = boto3.client('iam')
+    try:
+        # Note: Listing all roles can be slow and return many results.
+        # Consider adding filters if needed. Using MaxItems for now.
+        paginator = iam.get_paginator('list_roles')
+        for page in paginator.paginate(MaxItems=1000): # Limit results
+            roles = page.get('Roles', [])
+            for role in roles:
+                iam_data.append({
+                    "RoleName": role['RoleName'],
+                    "RoleId": role['RoleId'],
+                    "Arn": role['Arn'],
+                    "CreateDate": str(role['CreateDate'])
+                })
+    except ClientError as e:
+        print(f"Error listing IAM roles: {e}")
+    return iam_data
+
+
 def main():
     # Gather EC2-related resources
     (ec2_instances_data,
      ec2_volumes_data,
      nat_gateways_data,
      internet_gateways_data,
-     elastic_ips_data) = gather_ec2_data()
+     elastic_ips_data,
+     vpcs_data,
+     subnets_data) = gather_ec2_data()
 
     # S3
     s3_data = gather_s3_data()
@@ -382,6 +517,18 @@ def main():
      # Gather DynamoDB data
     dynamodb_data = gather_dynamodb_data()
 
+    # CloudFront
+    cloudfront_data = gather_cloudfront_data()
+
+    # Route 53
+    route53_data = gather_route53_data()
+
+    # SQS
+    sqs_data = gather_sqs_data()
+
+    # IAM Roles
+    iam_data = gather_iam_data()
+
 
     #
     # Now print tables using tabulate
@@ -404,7 +551,7 @@ def main():
     else:
         print("No NAT Gateways found.")
 
-    print("\n=== Internet Gateways ===")
+    print("\n=== Internet Gateways (Free Resource) ===")
     if internet_gateways_data:
         print(tabulate(internet_gateways_data, headers="keys", tablefmt="github"))
     else:
@@ -415,6 +562,18 @@ def main():
         print(tabulate(elastic_ips_data, headers="keys", tablefmt="github"))
     else:
         print("No Elastic IP addresses found.")
+
+    print("\n=== VPCs (Free Resource) ===")
+    if vpcs_data:
+        print(tabulate(vpcs_data, headers="keys", tablefmt="github"))
+    else:
+        print("No VPCs found.")
+
+    print("\n=== Subnets (Free Resource) ===")
+    if subnets_data:
+        print(tabulate(subnets_data, headers="keys", tablefmt="github"))
+    else:
+        print("No Subnets found.")
 
     print("\n=== S3 Buckets ===")
     if s3_data:
@@ -464,7 +623,7 @@ def main():
     else:
         print("No HTTP/WebSocket APIs found.")
 
-    print("\nFinished checking AWS resources in us-east-1 and us-west-1.\n")
+    print("\nFinished checking AWS resources in specified regions and global services.\n")
     
     print("\n=== DynamoDB Tables ===")
     if dynamodb_data:
@@ -472,7 +631,30 @@ def main():
     else:
         print("No DynamoDB tables found.")
     
-    print("\nFinished checking AWS resources in us-east-1 and us-west-1.\n")
+    print("\n=== CloudFront Distributions ===")
+    if cloudfront_data:
+        print(tabulate(cloudfront_data, headers="keys", tablefmt="github"))
+    else:
+        print("No CloudFront distributions found.")
+
+    print("\n=== Route 53 Hosted Zones ===")
+    if route53_data:
+        print(tabulate(route53_data, headers="keys", tablefmt="github"))
+    else:
+        print("No Route 53 hosted zones found.")
+
+    print("\n=== SQS Queues ===")
+    if sqs_data:
+        print(tabulate(sqs_data, headers="keys", tablefmt="github"))
+    else:
+        print("No SQS queues found.")
+
+    print("\n=== IAM Roles (Limited) (Free Resource) ===")
+    if iam_data:
+        print(tabulate(iam_data, headers="keys", tablefmt="github"))
+    else:
+        print("No IAM roles found (or error occurred).")
+    print("\nFinished checking AWS resources in specified regions and global services.\n")
 
 
 
